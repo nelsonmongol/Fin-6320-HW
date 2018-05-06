@@ -1,0 +1,150 @@
+---
+title: "FIN6320 Final Project"
+author: "Coke & Pepsi"
+date: "April 27, 2018"
+output: html_document
+---
+
+
+We have a trading strategy that we would like to try out and see if this is worth implementing as a means of making money. Many stocks have a related counterpart that moves in a like manner. For example, two stocks that we are looking at are Coke and Pepsi. One can easily understand that these two will move in a like manner. If there is good news for carbonated beverages, both of these two companies will benefit. Likewise bad news for the industry will affect both of these. Although the prices of the stocks may not move at the exact same rate, they will typically stay close to a given distance from each other, often referred to as a spread.
+
+Our intial analysis of the data will try to ensure that these two stocks are co-integrated; that is to say that the stocks have a relationship of moving together. Our first thing we did was to obtain daily stock prices for Coke and Pepsi back to the year 2000. This will provide ample data for us to work with.
+
+```{r}
+
+
+soda <- read.csv("Coke_Pepsi Stock.csv", header = TRUE)
+head(soda)
+attach(soda)
+library(urca)
+library(tseries)
+library(zoo)
+library(tsDyn)
+library(vars)
+```
+
+Here we read in the data and transform all variables to log.
+
+
+```{r}
+ln.coke <- log(soda$Coke)
+ln.pepsi <- log(soda$Pepsi)
+ln.coke.diff <- diff(ln.coke)
+ln.pepsi.diff <- diff(ln.pepsi)
+spread <- ln.coke - ln.pepsi
+
+soda.full <- merge.zoo(ln.coke, ln.pepsi)
+plot(soda.full, screens = 1, type = "l", lwd = 2, col = c("blue", "red"))
+```
+
+Here we can see that the stock prices plotted above move in a similar fashion. They drop at the same time and rise just the same. So this visual plot gives us evidence that these two are co-integrated, but it is not enough. We will need to use statistical techniques to verify the results.
+
+Now we will be looking at each of the stocks to see how they behave individually. 
+
+```{r}
+adf.coke <- ur.df(y = ln.coke, type = "none", selectlags = "BIC")
+adf.pepsi <- ur.df(y = ln.pepsi, type = "none", selectlags = "BIC")
+
+summary(adf.coke)
+summary(adf.pepsi)
+```
+
+The Augmented Dickey-Fuller test above shows that stock prices move randomly. Next we want to find out if the differences from day to day also move randomly, or if they are predictable. We want them to be predictable, thus implying that randomness in prices and not their daily difference. This is formally tested below.
+
+```{r}
+
+adf.coke.diff <- ur.df(y = ln.coke.diff, type = "none", selectlags = "BIC")
+adf.pepsi.diff <- ur.df(y = ln.pepsi.diff, type = "none", selectlags = "BIC")
+
+summary(adf.coke.diff)
+summary(adf.pepsi.diff)
+```
+
+The results are as expected. The differences are not random, and thus we have a condition where we can test if the two stocks are co-integrated. Since randomness is in their prices, we want to see if the randomness of each stock moves in the same pattern. The way to test this is to regress one stock on the other. Once we have a regression, we obtain the residual values of each observation and test it to see if these residuals are random or predictable. For the two to be considered co-integrated, the residuals should not be random. This allows us to predict how a random movement in one stock will be related to a random movement in the second stock.
+Our regression and test for this are run below.
+
+
+```{r}
+fit <- lm(ln.coke ~ ln.pepsi)
+summary(fit)
+
+resids <- fit$residuals
+plot(resids, type = "l", lwd = 2, col = "green", main = "Engle-Granger")
+
+adf.resids <- ur.df(y=resids, type = "none", selectlags = "BIC")
+summary(adf.resids)
+
+
+```
+
+We can see from this that Coke and Pepsi are co-integrated.
+The t-statistic is significant, meaning that these two move predictable in the same direction.
+
+
+VECM
+
+```{r}
+drink <- cbind(ln.coke, ln.pepsi)
+VARselect(drink, lag.max=10, type = "const")
+
+cointest <- ca.jo(drink, K = 4, type = "eigen", ecdet = "const", spec = "transitory")
+
+soda.vecm <- cajorls(cointest)
+soda.vecm
+soda.vecm$rlm$coefficients[1,1]
+soda.vecm$rlm$coefficients[1,2]
+soda.vecm$beta[1,1]
+soda.vecm$beta[2,1]
+```
+
+
+First we generate a strategy to use. We will consider a strategy that incorporated Moving averages of short and long moving averages to see if we should buy or sell a stock. If the spread of the long term moving average is higher than the spread of the short term moving average, we will look to buy the spread. Otherwise we want to short the spread because we will benefit from the spread coming back to it's normal level. Both of these strategies are crucial to understanding the way the spread works. As long as the spread is mean-reverting (which we have shown above that it is with the test for co-integration), it will come back to the long term moving average. This implies that the spread is predictable and can be arbitraged when there is movement in the spread.
+
+```{r}
+MovingAverageStrategy <- function(x, long=40, short=5)
+{
+N <- length(x)
+signals <- c(N-long)
+
+for (i in 1:(N-long))
+{
+iend <- i + long - 1
+ibeg <- i + long - short
+malong <- mean(x[i:iend])
+mashort <- mean(x[ibeg:iend])
+signals[i] <- sign(malong - mashort)
+}
+return(signals)
+}
+
+signals <- MovingAverageStrategy(spread)
+long <- 40
+N <- length(spread)
+del.k <- -diff(signals * spread[(1+long):N])
+del.0 <- diff(ln.coke[(1+long):N])
+d = del.0 - del.k
+
+m <- 10
+B <- 10000
+dstar <- tsbootstrap(d, nb = B, b = m, type = "stationary")
+```
+
+Here we are bootstrapping the data and finding the signals that come from this. We need these signals as a means to help us understand how often the stocks (and the spread) give us signals to buy or short the spread. This is important for us because we can see the probability of buying and selling. 
+
+Hansen's SPA Test
+
+```{r}
+dbar <- mean(d)
+dbar.b <- apply(dstar, 2, mean)
+n <- nrow(dstar)
+w.hat.2 <- mean((sqrt(n) * dbar.b - sqrt(n) * dbar)^2)
+t.spa <- max((sqrt(n) * dbar) / sqrt(w.hat.2), 0.0)
+t.spa
+
+```
+
+Using our code in R, our superior predictive ability test statistic was estimated to be .0507 and in Julia we had estimates of about .036. This suggests that there is little to no arbitrage between Coke and Pepsi, suggesting that we would not be able to beat the market's trading strategy. 
+
+
+###Write Personal paragraph for class.
+In many ways, I believe that I have learned a lot from this class. Being a student without any experience of coding, I have to admit it is not easy for me to understand all the knowledge that we learned from class and recordings. Of course, there is still a long road of coding for me. The good thing is I have the experience and practice in Python's class last semester. Moreover, the material in Github is really helpful, which provides a basic understanding of different models and coding. On the other hand, sitting beside Tyler and Lucas is an advantage because I can always ask them questions when I have problems in understanding. In a sense, they have helped me to have a further understanding of what I learn from our course. Anyway, after examining myself, I think probably a grade of B+ is quite reasonable.
